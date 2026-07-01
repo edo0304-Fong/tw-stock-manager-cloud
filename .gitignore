@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+.DS_Store
+*.log
+# 不建議把個人持股與交易紀錄提交到公開 GitHub；部署後請用 App 匯入 CSV。
+# 若你使用 private repo 且接受風險，可自行取消下面三行註解。
+# data/portfolio.csv
+# data/alerts.csv
+# data/trades.csv
