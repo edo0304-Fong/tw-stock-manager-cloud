@@ -373,7 +373,8 @@ elif page == "CSV 匯入":
     st.header("CSV 匯入")
     st.write("可匯入我幫你整理的 Yahoo 股市持股 CSV，也支援本系統下載出的 portfolio CSV。")
 
-    uploaded_csv = st.file_uploader("上傳持股 CSV", type=["csv"], key="portfolio_csv_uploader")
+    st.info("手機 Android 若看到 CSV 反灰，通常是檔案選擇器的 MIME 類型判斷問題。本版已改成接受所有檔案；只要內容是 CSV 即可匯入。")
+    uploaded_csv = st.file_uploader("上傳持股 CSV（手機版已放寬檔案類型）", type=None, key="portfolio_csv_uploader")
     st.caption("支援欄位：股票代號/股票名稱/持有股數/持股成本均價，或 symbol/name/shares/avg_cost。股票代號可含 .TW 或 .TWO。")
 
     csv_text = st.text_area(
@@ -382,13 +383,96 @@ elif page == "CSV 匯入":
         placeholder="股票名稱,股票代號,持有股數,持股成本均價\n台積電,2330.TW,100,1890\n鴻海,2317.TW,2000,139.25",
     )
 
+    simple_text = st.text_area(
+        "手機備援：直接貼簡易格式（不用逗號也可以）",
+        height=120,
+        placeholder="2330 台積電 100 1890\n2317 鴻海 2000 139.25\n00631L 元大台灣50正2 16000 26.98",
+    )
+
+    def read_uploaded_csv_safely(uploaded_file):
+        """Read CSV uploaded from Android/Chrome/GDrive robustly.
+
+        Android sometimes reports CSV files with a generic MIME type, and
+        pandas' direct read from UploadedFile may try UTF-8 only.  We therefore
+        read raw bytes first, try common Taiwan/Excel encodings, then parse from
+        decoded text.  This prevents UnicodeDecodeError from crashing the app.
+        """
+        from io import StringIO
+
+        data = uploaded_file.getvalue()
+        if not data:
+            raise ValueError("上傳的檔案是空的。")
+
+        # Remove UTF-16/Excel null bytes if present, but keep a copy for decoding.
+        candidates = []
+        for enc in ["utf-8-sig", "utf-8", "cp950", "big5", "big5hkscs", "utf-16", "utf-16le", "utf-16be", "latin1"]:
+            try:
+                text = data.decode(enc)
+                text = text.replace("\x00", "").strip()
+                if text:
+                    candidates.append((enc, text))
+            except UnicodeDecodeError:
+                continue
+            except Exception:
+                continue
+
+        # Final safe fallback: never throw a UnicodeDecodeError to Streamlit.
+        if not candidates:
+            text = data.decode("utf-8", errors="replace").replace("\x00", "").strip()
+            candidates.append(("utf-8-replace", text))
+
+        last_error = None
+        for enc, text in candidates:
+            try:
+                df = pd.read_csv(StringIO(text), engine="python")
+                if len(df.columns) >= 2:
+                    st.caption(f"CSV 已用 {enc} 編碼讀取。")
+                    return df
+            except Exception as exc:
+                last_error = exc
+
+        # Extremely defensive fallback for simple comma-separated rows.
+        # This helps when Android/Excel adds odd metadata or pandas cannot infer columns.
+        text = candidates[0][1]
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if len(lines) >= 2 and "," in lines[0]:
+            header = [h.strip() for h in lines[0].split(",")]
+            rows = []
+            for ln in lines[1:]:
+                parts = [x.strip() for x in ln.split(",")]
+                if len(parts) < len(header):
+                    parts += [""] * (len(header) - len(parts))
+                rows.append(dict(zip(header, parts[:len(header)])))
+            return pd.DataFrame(rows)
+
+        raise ValueError(f"CSV 讀取失敗，請改用『直接貼上 CSV 內容』。最後錯誤：{last_error}")
+
+    def parse_simple_portfolio_text(text: str) -> pd.DataFrame:
+        rows = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.replace(",", " ").split()
+            if len(parts) < 4:
+                continue
+            symbol = parts[0].strip()
+            # 最後兩欄視為股數、成本，中間合併為名稱。
+            shares = parts[-2]
+            avg_cost = parts[-1]
+            name = "".join(parts[1:-2])
+            rows.append({
+                "股票代號": symbol,
+                "股票名稱": name,
+                "持有股數": shares,
+                "持股成本均價": avg_cost,
+            })
+        return pd.DataFrame(rows)
+
     raw_df = None
     if uploaded_csv is not None:
         try:
-            raw_df = pd.read_csv(uploaded_csv)
-        except UnicodeDecodeError:
-            uploaded_csv.seek(0)
-            raw_df = pd.read_csv(uploaded_csv, encoding="utf-8-sig")
+            raw_df = read_uploaded_csv_safely(uploaded_csv)
         except Exception as exc:
             st.error(f"CSV 讀取失敗：{exc}")
     elif csv_text.strip():
@@ -397,6 +481,11 @@ elif page == "CSV 匯入":
             raw_df = pd.read_csv(StringIO(csv_text))
         except Exception as exc:
             st.error(f"貼上內容讀取失敗：{exc}")
+    elif simple_text.strip():
+        try:
+            raw_df = parse_simple_portfolio_text(simple_text)
+        except Exception as exc:
+            st.error(f"簡易格式讀取失敗：{exc}")
 
     if isinstance(raw_df, pd.DataFrame):
         st.subheader("原始 CSV 預覽")
